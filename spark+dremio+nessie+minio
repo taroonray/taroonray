@@ -1,0 +1,148 @@
+services:
+
+  minio:
+    image: minio/minio:latest
+    hostname: minio
+    ports:
+      - 9001:9001
+      - 9000:9000
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_DOMAIN=storage
+      - MINIO_REGION_NAME=us-east-1
+      - MINIO_REGION=us-east-1
+    networks:
+      - iceberg
+    container_name: minio
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./lakehouse/minio/data:/data
+  spark-master:
+    image: docker.io/bitnami/spark:3.5
+    user: "0"
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+      - SPARK_PUBLIC_DNS=localhost
+      - SPARK_DRIVER_BIND_ADDRESS=0.0.0.0
+    ports:
+      - '8080:8080'
+      - '7077:7077'
+    networks:
+      - iceberg
+
+  spark-worker:
+    image: docker.io/bitnami/spark:3.5
+    user: "0"
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_CORES=1
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+      - SPARK_PUBLIC_DNS=localhost
+    ports:
+      - '8081:8081'
+    depends_on:
+      - spark-master
+    networks:
+      - iceberg
+
+  jupyter-local:
+    depends_on:
+      - spark-master
+    build: .
+    user: "0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m jupyterlab --ip "0.0.0.0" --no-browser --allow-root --NotebookApp.token=''
+    ports:
+      - "8888:8888"
+      - "4040:4040"
+    volumes:
+      - ./notebooks:/notebooks # persistent storage
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JAVA_HOME=/opt/bitnami/java
+    networks:
+      - iceberg
+
+  nessie:
+    image: ghcr.io/projectnessie/nessie:0.96.1
+    platform: linux/amd64
+    user: "0"
+    container_name: nessie
+    environment:
+      # Version store settings.
+      # This example uses ephemeral storage, data is lost during reset.
+      # - nessie.version.store.type=IN_MEMORY
+      - nessie.version.store.type=JDBC
+      - nessie.version.store.persist.jdbc.datasource=postgresql
+      - quarkus.datasource.postgresql.jdbc.url=jdbc:postgresql://nessie-db:5432/nessie
+      - quarkus.datasource.postgresql.username=nessie_user
+      - quarkus.datasource.postgresql.password=nessie_password
+      # Object store settings.
+      # This example uses MinIO as the object store.
+      - nessie.catalog.default-warehouse=warehouse
+      - nessie.catalog.warehouses.warehouse.location=s3a://warehouse/
+      - nessie.catalog.service.s3.default-options.region=us-east-1
+      - nessie.catalog.service.s3.default-options.path-style-access=true
+      # - nessie.catalog.service.s3.default-options.access-key=urn:nessie-secret:quarkus:nessie.catalog.secrets.access-key
+      # - nessie.catalog.secrets.access-key.name=minioadmin
+      # - nessie.catalog.secrets.access-key.secret=minioadmin
+      # Provide MinIO credentials directly
+      - nessie.catalog.service.s3.default-options.access-key=minioadmin
+      - nessie.catalog.service.s3.default-options.secret-key=minioadmin
+      # MinIO endpoint for Nessie server
+      - nessie.catalog.service.s3.default-options.endpoint=http://minio:9000/
+      # MinIO endpoint for clients (on the Podman/Docker host)
+      - nessie.catalog.service.s3.default-options.external-endpoint=http://minio:9001/
+      # Authorization settings.
+    networks:
+      - iceberg
+    ports:
+      - '19120:19120'
+    volumes:
+      - ./lakehouse/nessie/data:/var/lib/nessie/data
+
+  nessie-db:
+    image: postgres:14.1-alpine
+    hostname: nessie-db
+    container_name: nessie-db
+    environment:
+      POSTGRES_DB: nessie
+      POSTGRES_USER: nessie_user
+      POSTGRES_PASSWORD: nessie_password
+    ports:
+      - 5432:5432
+    volumes:
+      - ./lakehouse/nessie/db_data:/var/lib/postgresql/data
+    networks:
+      - iceberg
+
+  dremio:
+    platform: linux/amd64
+    image: dremio/dremio-oss:latest
+    user: "0"
+    ports:
+      - 9047:9047
+      - 31010:31010
+      - 32010:32010
+    container_name: dremio
+    environment:
+      - DREMIO_JAVA_SERVER_EXTRA_OPTS=-Dpaths.dist=file:///opt/dremio/data/dist
+    networks:
+      - iceberg
+
+networks:
+  iceberg:
+    driver: bridge
